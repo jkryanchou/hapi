@@ -286,12 +286,8 @@ export function HappyComposer(props: {
             return
         }
 
-        // Shift+Enter sends the message (works on all platforms including iPadOS with keyboard)
+        // Shift+Enter inserts a newline (let default textarea behavior handle it)
         if (key === 'Enter' && e.shiftKey) {
-            e.preventDefault()
-            if (!canSend) return
-            api.composer().send()
-            setShowContinueHint(false)
             return
         }
 
