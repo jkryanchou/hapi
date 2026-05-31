@@ -17,10 +17,17 @@ COPY docs/package.json    docs/package.json
 
 RUN bun install --frozen-lockfile
 
-# ── Stage 2: runtime with agent CLIs ─────────────────────────────────────────
-# Use the full (non-slim) image so npm is available for global agent installs.
+# ── Stage 2: runtime with Node.js + agent CLIs ───────────────────────────────
+# oven/bun does not ship npm; install Node.js 22 via NodeSource so we can
+# install agent CLIs as standard npm global packages.
 FROM oven/bun:1.3.14 AS runtime
 WORKDIR /app
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl ca-certificates gnupg && \
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    rm -rf /var/lib/apt/lists/*
 
 COPY --from=deps /app/node_modules ./node_modules
 # Copy monorepo source (runner needs cli/ + shared/ + hub/ workspaces at runtime)
@@ -40,7 +47,7 @@ RUN npm install -g @openai/codex
 RUN npm install -g @google/gemini-cli
 
 # OpenCode     (→ `opencode` command)
-RUN npm install -g opencode-ai || npm install -g opencode || true
+RUN npm install -g opencode-ai 2>/dev/null || npm install -g opencode 2>/dev/null || true
 
 # Cursor Agent CLI:
 # Cursor is a desktop application; its CLI is not available as a standalone npm
