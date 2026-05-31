@@ -1,0 +1,12 @@
+.git
+.claude
+**/.env*
+**/*.log
+**/node_modules
+**/dist
+**/dist-exe
+cli/release-artifacts
+web/dist
+hub/src/web/embeddedAssets.generated.ts
+website/.vitepress
+docs/.vitepress
