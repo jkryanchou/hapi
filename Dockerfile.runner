@@ -77,4 +77,9 @@ CMD ["sh", "-c", "\
   fi && \
   printf '{\"$schema\":\"https://opencode.ai/config.json\",\"provider\":{\"github-copilot\":{}},\"model\":\"github-copilot/claude-sonnet-4.6\"}' \
     > /root/.config/opencode/opencode.json && \
+  mkdir -p /root/.codex && \
+  if [ -n \"$CODEX_AUTH_JSON\" ]; then \
+    printf '%s' \"$CODEX_AUTH_JSON\" > /root/.codex/auth.json; \
+  fi && \
+  printf '[projects.\"/workspace\"]\ntrust_level = \"trusted\"\n' > /root/.codex/config.toml && \
   exec bun cli/src/index.ts runner start-sync --workspace-root /workspace"]
