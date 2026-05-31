@@ -30,10 +30,9 @@ services:
       # Credential dirs for coding agents (read-only mounts from the host)
       - ${HOST_HOME:-/home/admin}/.claude:/root/.claude:ro
       - ${HOST_HOME:-/home/admin}/.config/claude:/root/.config/claude:ro
-      - ${HOST_HOME:-/home/admin}/.codex:/root/.codex:ro
       - ${HOST_HOME:-/home/admin}/.gemini:/root/.gemini:ro
-      # opencode config + auth dirs are NOT bind-mounted — opencode needs write
-      # access to both. auth.json is injected via OPENCODE_AUTH_JSON env var.
+      # codex + opencode dirs are NOT bind-mounted — both need write access.
+      # auth.json is injected via CODEX_AUTH_JSON / OPENCODE_AUTH_JSON env vars.
     depends_on:
       - hapi-personal
     networks:
@@ -67,7 +66,6 @@ services:
       - work-workspace:/workspace
       - ${HOST_HOME:-/home/admin}/.claude:/root/.claude:ro
       - ${HOST_HOME:-/home/admin}/.config/claude:/root/.config/claude:ro
-      - ${HOST_HOME:-/home/admin}/.codex:/root/.codex:ro
       - ${HOST_HOME:-/home/admin}/.gemini:/root/.gemini:ro
     depends_on:
       - hapi-work
