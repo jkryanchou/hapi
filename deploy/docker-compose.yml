@@ -8,6 +8,7 @@ services:
       HAPI_LISTEN_PORT: 3006
       HAPI_PUBLIC_URL: https://hapi-personal.jkryanchou.com
       CLI_API_TOKEN: ${PERSONAL_TOKEN}
+      TELEGRAM_BOT_TOKEN: ${PERSONAL_TELEGRAM_BOT_TOKEN}
     volumes:
       - hapi-personal-data:/root/.hapi
     networks:
@@ -46,6 +47,7 @@ services:
       HAPI_LISTEN_PORT: 3006
       HAPI_PUBLIC_URL: https://hapi-work.jkryanchou.com
       CLI_API_TOKEN: ${WORK_TOKEN}
+      TELEGRAM_BOT_TOKEN: ${WORK_TELEGRAM_BOT_TOKEN}
     volumes:
       - hapi-work-data:/root/.hapi
     networks:
