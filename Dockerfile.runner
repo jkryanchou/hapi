@@ -62,5 +62,7 @@ ENV HAPI_API_URL=http://hapi-hub:3006
 # Workspace code that agents will work in is mounted at /workspace.
 VOLUME ["/root/.hapi", "/workspace"]
 
-# Use start-sync (foreground) so the container stays alive while the runner runs.
-CMD ["bun", "cli/src/index.ts", "runner", "start-sync", "--workspace-root", "/workspace"]
+# Clear any stale state file from previous container runs (it lives in the
+# persisted volume and causes start-sync to think a runner is already running).
+# Then exec bun so it becomes PID 1 and handles signals correctly.
+CMD ["sh", "-c", "rm -f /root/.hapi/runner.state.json /root/.hapi/runner.state.json.lock && exec bun cli/src/index.ts runner start-sync --workspace-root /workspace"]
