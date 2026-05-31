@@ -75,6 +75,6 @@ CMD ["sh", "-c", "\
   if [ -n \"$OPENCODE_AUTH_JSON\" ]; then \
     printf '%s' \"$OPENCODE_AUTH_JSON\" > /root/.local/share/opencode/auth.json; \
   fi && \
-  printf '{\"$schema\":\"https://opencode.ai/config.json\",\"provider\":{\"github-copilot\":{}},\"model\":\"github-copilot/claude-sonnet-4-5\"}' \
+  printf '{\"$schema\":\"https://opencode.ai/config.json\",\"provider\":{\"github-copilot\":{}},\"model\":\"github-copilot/claude-sonnet-4.6\"}' \
     > /root/.config/opencode/opencode.json && \
   exec bun cli/src/index.ts runner start-sync --workspace-root /workspace"]
