@@ -31,8 +31,8 @@ services:
       - ${HOST_HOME:-/home/admin}/.codex:/root/.codex:ro
       - ${HOST_HOME:-/home/admin}/.gemini:/root/.gemini:ro
       - ${HOST_HOME:-/home/admin}/.config/opencode:/root/.config/opencode:ro
-      # opencode stores OAuth tokens (GitHub Copilot) here
-      - ${HOST_HOME:-/home/admin}/.local/share/opencode:/root/.local/share/opencode:ro
+      # opencode needs write access to ~/.local/share/opencode (creates repos/ subdir on startup).
+      # auth.json is injected via the entrypoint CMD in Dockerfile.runner instead of a ro mount.
     depends_on:
       - hapi-personal
     networks:
@@ -67,7 +67,6 @@ services:
       - ${HOST_HOME:-/home/admin}/.codex:/root/.codex:ro
       - ${HOST_HOME:-/home/admin}/.gemini:/root/.gemini:ro
       - ${HOST_HOME:-/home/admin}/.config/opencode:/root/.config/opencode:ro
-      - ${HOST_HOME:-/home/admin}/.local/share/opencode:/root/.local/share/opencode:ro
     depends_on:
       - hapi-work
     networks:
