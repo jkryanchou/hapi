@@ -1,0 +1,98 @@
+services:
+  # ─── Personal hub ────────────────────────────────────────────────────────────
+  hapi-personal:
+    image: ghcr.io/jkryanchou/hapi-hub:latest
+    restart: unless-stopped
+    environment:
+      HAPI_LISTEN_HOST: 0.0.0.0
+      HAPI_LISTEN_PORT: 3006
+      HAPI_PUBLIC_URL: https://hapi-personal.jkryanchou.com
+      CLI_API_TOKEN: ${PERSONAL_TOKEN}
+    volumes:
+      - hapi-personal-data:/root/.hapi
+    networks:
+      - hapi-net
+
+  hapi-personal-runner:
+    image: ghcr.io/jkryanchou/hapi-runner:latest
+    restart: unless-stopped
+    environment:
+      HAPI_API_URL: http://hapi-personal:3006
+      CLI_API_TOKEN: ${PERSONAL_TOKEN}
+      # Optional: explicit paths if agent CLIs are not on PATH
+      # HAPI_CLAUDE_PATH: /usr/local/bin/claude
+    volumes:
+      - personal-runner-home:/root/.hapi
+      - personal-workspace:/workspace
+      # Credential dirs for coding agents (read-only mounts from the host)
+      - ${HOST_HOME:-/home/admin}/.claude:/root/.claude:ro
+      - ${HOST_HOME:-/home/admin}/.config/claude:/root/.config/claude:ro
+      - ${HOST_HOME:-/home/admin}/.codex:/root/.codex:ro
+      - ${HOST_HOME:-/home/admin}/.gemini:/root/.gemini:ro
+      - ${HOST_HOME:-/home/admin}/.config/opencode:/root/.config/opencode:ro
+    depends_on:
+      - hapi-personal
+    networks:
+      - hapi-net
+
+  # ─── Work hub ─────────────────────────────────────────────────────────────────
+  hapi-work:
+    image: ghcr.io/jkryanchou/hapi-hub:latest
+    restart: unless-stopped
+    environment:
+      HAPI_LISTEN_HOST: 0.0.0.0
+      HAPI_LISTEN_PORT: 3006
+      HAPI_PUBLIC_URL: https://hapi-work.jkryanchou.com
+      CLI_API_TOKEN: ${WORK_TOKEN}
+    volumes:
+      - hapi-work-data:/root/.hapi
+    networks:
+      - hapi-net
+
+  hapi-work-runner:
+    image: ghcr.io/jkryanchou/hapi-runner:latest
+    restart: unless-stopped
+    environment:
+      HAPI_API_URL: http://hapi-work:3006
+      CLI_API_TOKEN: ${WORK_TOKEN}
+    volumes:
+      - work-runner-home:/root/.hapi
+      - work-workspace:/workspace
+      - ${HOST_HOME:-/home/admin}/.claude:/root/.claude:ro
+      - ${HOST_HOME:-/home/admin}/.config/claude:/root/.config/claude:ro
+      - ${HOST_HOME:-/home/admin}/.codex:/root/.codex:ro
+      - ${HOST_HOME:-/home/admin}/.gemini:/root/.gemini:ro
+      - ${HOST_HOME:-/home/admin}/.config/opencode:/root/.config/opencode:ro
+    depends_on:
+      - hapi-work
+    networks:
+      - hapi-net
+
+  # ─── Cloudflare Tunnel ────────────────────────────────────────────────────────
+  # Routes hapi-personal.jkryanchou.com → http://hapi-personal:3006
+  #        hapi-work.jkryanchou.com     → http://hapi-work:3006
+  # Ingress is configured remotely in the Cloudflare dashboard (Zero Trust →
+  # Networks → Tunnels → hapi → Public Hostname). The container just carries
+  # the tunnel token; routing is owned by Cloudflare's remotely-managed config.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --protocol http2 run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    depends_on:
+      - hapi-personal
+      - hapi-work
+    networks:
+      - hapi-net
+
+networks:
+  hapi-net:
+
+volumes:
+  hapi-personal-data:
+  hapi-work-data:
+  personal-runner-home:
+  work-runner-home:
+  personal-workspace:
+  work-workspace:
