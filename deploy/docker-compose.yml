@@ -21,7 +21,7 @@ services:
       HAPI_API_URL: http://hapi-personal:3006
       CLI_API_TOKEN: ${PERSONAL_TOKEN}
       OPENCODE_AUTH_JSON: ${OPENCODE_AUTH_JSON}
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      CODEX_AUTH_JSON: ${CODEX_AUTH_JSON}
       # Optional: explicit paths if agent CLIs are not on PATH
       # HAPI_CLAUDE_PATH: /usr/local/bin/claude
     volumes:
@@ -61,7 +61,7 @@ services:
       HAPI_API_URL: http://hapi-work:3006
       CLI_API_TOKEN: ${WORK_TOKEN}
       OPENCODE_AUTH_JSON: ${OPENCODE_AUTH_JSON}
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      CODEX_AUTH_JSON: ${CODEX_AUTH_JSON}
     volumes:
       - work-runner-home:/root/.hapi
       - work-workspace:/workspace
