@@ -62,7 +62,17 @@ ENV HAPI_API_URL=http://hapi-hub:3006
 # Workspace code that agents will work in is mounted at /workspace.
 VOLUME ["/root/.hapi", "/workspace"]
 
-# Clear any stale state file from previous container runs (it lives in the
-# persisted volume and causes start-sync to think a runner is already running).
-# Then exec bun so it becomes PID 1 and handles signals correctly.
-CMD ["sh", "-c", "rm -f /root/.hapi/runner.state.json /root/.hapi/runner.state.json.lock && exec bun cli/src/index.ts runner start-sync --workspace-root /workspace"]
+# Startup sequence:
+# 1. Clear stale runner state (persisted volume survives restarts; stale PID
+#    causes start-sync to think a runner is already alive and exit immediately).
+# 2. Seed opencode auth: ~/.local/share/opencode/ must be WRITABLE (opencode
+#    creates a repos/ subdir on startup), so we cannot bind-mount it read-only.
+#    Instead, copy auth.json from the read-only config mount on each start.
+# 3. exec bun so it becomes PID 1 and receives Docker's SIGTERM correctly.
+CMD ["sh", "-c", "\
+  rm -f /root/.hapi/runner.state.json /root/.hapi/runner.state.json.lock && \
+  mkdir -p /root/.local/share/opencode && \
+  if [ -f /root/.config/opencode/auth.json ]; then \
+    cp /root/.config/opencode/auth.json /root/.local/share/opencode/auth.json; \
+  fi && \
+  exec bun cli/src/index.ts runner start-sync --workspace-root /workspace"]
