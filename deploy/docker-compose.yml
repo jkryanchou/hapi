@@ -1,5 +1,9 @@
 services:
   # ─── Personal hub ────────────────────────────────────────────────────────────
+  # NOTE: the runners are no longer Docker services. They run as Incus (LXC)
+  # system containers provisioned from deploy/incus/ (see HANDOFF.md). Each hub
+  # is published on the Incus bridge gateway (10.236.0.1) so the Incus runners
+  # can reach it over HAPI_API_URL — private to the host, not the public net.
   hapi-personal:
     image: ghcr.io/jkryanchou/hapi-hub:latest
     restart: unless-stopped
@@ -9,32 +13,10 @@ services:
       HAPI_PUBLIC_URL: https://hapi-personal.jkryanchou.com
       CLI_API_TOKEN: ${PERSONAL_TOKEN}
       TELEGRAM_BOT_TOKEN: ${PERSONAL_TELEGRAM_BOT_TOKEN}
+    ports:
+      - "${INCUS_GW:-10.236.0.1}:3006:3006"   # reachable by the Incus personal-runner
     volumes:
       - hapi-personal-data:/root/.hapi
-    networks:
-      - hapi-net
-
-  hapi-personal-runner:
-    image: ghcr.io/jkryanchou/hapi-runner:latest
-    restart: unless-stopped
-    environment:
-      HAPI_API_URL: http://hapi-personal:3006
-      CLI_API_TOKEN: ${PERSONAL_TOKEN}
-      OPENCODE_AUTH_JSON: ${OPENCODE_AUTH_JSON}
-      CODEX_AUTH_JSON: ${CODEX_AUTH_JSON}
-      # Optional: explicit paths if agent CLIs are not on PATH
-      # HAPI_CLAUDE_PATH: /usr/local/bin/claude
-    volumes:
-      - personal-runner-home:/root/.hapi
-      - personal-workspace:/workspace
-      # Credential dirs for coding agents (read-only mounts from the host)
-      - ${HOST_HOME:-/home/admin}/.claude:/root/.claude:ro
-      - ${HOST_HOME:-/home/admin}/.config/claude:/root/.config/claude:ro
-      - ${HOST_HOME:-/home/admin}/.gemini:/root/.gemini:ro
-      # codex + opencode dirs are NOT bind-mounted — both need write access.
-      # auth.json is injected via CODEX_AUTH_JSON / OPENCODE_AUTH_JSON env vars.
-    depends_on:
-      - hapi-personal
     networks:
       - hapi-net
 
@@ -48,27 +30,10 @@ services:
       HAPI_PUBLIC_URL: https://hapi-work.jkryanchou.com
       CLI_API_TOKEN: ${WORK_TOKEN}
       TELEGRAM_BOT_TOKEN: ${WORK_TELEGRAM_BOT_TOKEN}
+    ports:
+      - "${INCUS_GW:-10.236.0.1}:3007:3006"   # reachable by the Incus work-runner
     volumes:
       - hapi-work-data:/root/.hapi
-    networks:
-      - hapi-net
-
-  hapi-work-runner:
-    image: ghcr.io/jkryanchou/hapi-runner:latest
-    restart: unless-stopped
-    environment:
-      HAPI_API_URL: http://hapi-work:3006
-      CLI_API_TOKEN: ${WORK_TOKEN}
-      OPENCODE_AUTH_JSON: ${OPENCODE_AUTH_JSON}
-      CODEX_AUTH_JSON: ${CODEX_AUTH_JSON}
-    volumes:
-      - work-runner-home:/root/.hapi
-      - work-workspace:/workspace
-      - ${HOST_HOME:-/home/admin}/.claude:/root/.claude:ro
-      - ${HOST_HOME:-/home/admin}/.config/claude:/root/.config/claude:ro
-      - ${HOST_HOME:-/home/admin}/.gemini:/root/.gemini:ro
-    depends_on:
-      - hapi-work
     networks:
       - hapi-net
 
@@ -96,7 +61,3 @@ networks:
 volumes:
   hapi-personal-data:
   hapi-work-data:
-  personal-runner-home:
-  work-runner-home:
-  personal-workspace:
-  work-workspace:

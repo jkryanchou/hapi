@@ -17,14 +17,14 @@ jobs:
             contents: read
             packages: write
 
+        # Only the hub is a Docker image. The runner now runs as an Incus
+        # (LXC) system container provisioned from deploy/incus/ — see HANDOFF.md.
         strategy:
             fail-fast: false
             matrix:
                 include:
                     - image: hapi-hub
                       dockerfile: Dockerfile
-                    - image: hapi-runner
-                      dockerfile: Dockerfile.runner
 
         steps:
             - uses: actions/checkout@v4

@@ -1,0 +1,24 @@
+# Canonical copy of the HAPI runner systemd unit.
+# This same content is embedded in cloud-init.runner.yaml (write_files) so the
+# golden image ships with it. Kept here as the human-readable source of truth.
+#
+# Installed at: /etc/systemd/system/hapi-runner.service
+[Unit]
+Description=HAPI runner (start-sync)
+After=network-online.target
+Wants=network-online.target
+# Stay inactive until the hub link/token has been provisioned.
+ConditionPathExists=/etc/hapi.env
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/hapi.env
+WorkingDirectory=/opt/hapi
+# Clear stale runner state (reused PID can make start-sync exit immediately).
+ExecStartPre=/usr/bin/rm -f /root/.hapi/runner.state.json /root/.hapi/runner.state.json.lock
+ExecStart=/root/.bun/bin/bun /opt/hapi/cli/src/index.ts runner start-sync --workspace-root /workspace
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -18,7 +18,9 @@ Run two independent HAPI stacks from the fork `github.com/jkryanchou/hapi`:
 | work     | `https://hapi-work.jkryanchou.com`     | Claude Code, Codex, OpenCode, Gemini   |
 
 Each stack = **one hub + one dedicated runner**. A single `cloudflared`
-container fronts both. Images are built by GitHub Actions and pushed to GHCR.
+container fronts both. The **hubs + cloudflared run in Docker** (images built by
+GitHub Actions → GHCR); the **runners run as Incus (LXC) system containers**
+(see §6a) so agents get a full OS to work in.
 
 ---
 
@@ -33,12 +35,17 @@ container fronts both. Images are built by GitHub Actions and pushed to GHCR.
                   └─────────┬─────────┘
             ┌───────────────┴───────────────┐
             ▼                                ▼
-   hapi-personal:3006              hapi-work:3006        (hub: REST+SSE+Telegram)
-            ▲                                ▲
-            │ Socket.IO /cli                 │ Socket.IO /cli
-   hapi-personal-runner            hapi-work-runner       (spawns agent sessions)
+   hapi-personal:3006              hapi-work:3006        (Docker hub: REST+SSE+Telegram)
+            ▲                                ▲             published on 10.236.0.1:3006/:3007
+            │ Socket.IO /cli                 │ Socket.IO /cli  (Incus → host gateway)
+   hapi-personal-runner            hapi-work-runner       (Incus LXC; spawns agent sessions)
    workspace: /workspace           workspace: /workspace
 ```
+
+> Hubs + cloudflared are Docker (`hapi-net`); runners are Incus (`incusbr0`).
+> Runners reach their hub via the Incus bridge gateway `10.236.0.1` (hubs publish
+> there). Docker's `FORWARD DROP` is neutralised with `ip-forward-no-drop` in
+> `/etc/docker/daemon.json`.
 
 - **Hub ↔ Runner pairing**: shared `CLI_API_TOKEN` per stack
   (`PERSONAL_TOKEN`, `WORK_TOKEN`).
@@ -57,9 +64,12 @@ and via `workflow_dispatch`. Matrix builds both images; pushes `:latest` + `:sha
 | Image                              | Dockerfile         | Contents                                          |
 |------------------------------------|--------------------|---------------------------------------------------|
 | `ghcr.io/jkryanchou/hapi-hub`      | `Dockerfile`       | Hub + embedded web PWA (slim runtime)             |
-| `ghcr.io/jkryanchou/hapi-runner`   | `Dockerfile.runner`| Bun + Node 22 + agent CLIs (claude/codex/gemini/opencode) |
 
 Auth uses the workflow's `GITHUB_TOKEN` with `packages: write` — no PAT needed.
+
+> The runner is **no longer a Docker image**. It is an Incus container built from
+> `deploy/incus/cloud-init.runner.yaml` + a local golden snapshot (no registry).
+> `Dockerfile.runner` is retired to `deploy/legacy/`.
 
 ---
 
@@ -68,54 +78,77 @@ Auth uses the workflow's `GITHUB_TOKEN` with `packages: write` — no PAT needed
 | File                          | Purpose                                                       |
 |-------------------------------|---------------------------------------------------------------|
 | `Dockerfile`                  | hub image; embeds PWA via `generate:embedded-web-assets`      |
-| `Dockerfile.runner`           | runner image; installs Node 22 + agent CLIs; CMD seeds auth   |
 | `.dockerignore`               | excludes git, node_modules, dist, generated assets            |
-| `.github/workflows/docker-publish.yml` | CI build/push both images to GHCR                    |
-| `deploy/docker-compose.yml`   | 5 services (2 hubs, 2 runners, cloudflared)                   |
+| `.github/workflows/docker-publish.yml` | CI build/push the **hub** image to GHCR              |
+| `deploy/docker-compose.yml`   | 3 services (2 hubs + cloudflared); runners are Incus now      |
 | `deploy/.env.example`         | documents required env vars                                   |
+| `deploy/incus/`               | runner cloud-init, systemd unit, profile, `bootstrap.sh`      |
+| `deploy/legacy/Dockerfile.runner` | retired Docker runner image (basis for the cloud-init)    |
 
 ---
 
-## 5. Runner CMD startup sequence
+## 5. Runner startup (Incus systemd unit)
 
-The runner image must run **foreground** (`runner start-sync`, not `start`
-which daemonizes and exits → kills the container). On each startup the CMD:
+The runner is an Incus system container running `hapi-runner.service` (see
+`deploy/incus/hapi-runner.service`). systemd owns restart/signals — no more
+`exec bun` PID-1 trick or hand-rolled CMD shell. The unit:
 
-1. **Clears stale runner state** — `runner.state.json` persists in the named
-   volume across restarts. Docker reuses low PIDs, which can match the stale
-   PID, making `start-sync` think a runner is already alive and exit → restart
-   loop. Removing the file on boot prevents this.
-2. **Seeds opencode auth** — writes `OPENCODE_AUTH_JSON` to
-   `~/.local/share/opencode/auth.json` and a config at
-   `~/.config/opencode/opencode.json` (default model
-   `github-copilot/claude-sonnet-4.6`).
-3. **Seeds codex auth** — writes `CODEX_AUTH_JSON` to `~/.codex/auth.json` and
-   a minimal `~/.codex/config.toml` trusting `/workspace`.
-4. `exec bun ...` so bun becomes PID 1 and handles SIGTERM.
+1. `ConditionPathExists=/etc/hapi.env` — stays inactive until the hub link/token
+   is provisioned (`bootstrap.sh` pushes it, then `systemctl enable --now`).
+2. `ExecStartPre=rm -f /root/.hapi/runner.state.json*` — clears stale runner
+   state (a reused PID can make `start-sync` think a runner is alive and exit).
+3. `ExecStart=/root/.bun/bin/bun /opt/hapi/cli/src/index.ts runner start-sync
+   --workspace-root /workspace` — foreground; `Restart=always`.
+
+Non-secret config (codex `config.toml` trusting `/workspace`, opencode
+`opencode.json` default model `github-copilot/claude-sonnet-4.6`) is baked into
+the golden image by cloud-init. Update HAPI with
+`git -C /opt/hapi pull && bun install && systemctl restart hapi-runner`.
 
 ---
 
-## 6. Agent authentication strategy
+## 6. Agent authentication strategy (Incus)
 
-| Agent       | Method                          | Why                                                  |
-|-------------|---------------------------------|------------------------------------------------------|
-| Claude Code | RO bind-mount `~/.claude`       | Static credentials, no writes needed                 |
-| Gemini      | RO bind-mount `~/.gemini`       | Static credentials                                   |
-| OpenCode    | `OPENCODE_AUTH_JSON` env var    | Needs **write** access (creates `repos/`) → can't be `:ro` |
-| Codex       | `CODEX_AUTH_JSON` env var       | Needs **write** access (sessions, DBs) → can't be `:ro` |
+System containers have **writable** config dirs, so credentials are just files
+pushed into the container once per runner (re-push only on rotation). No env-var
+injection, no read-only mounts.
 
-**Lesson learned:** opencode and codex both fail with `EROFS: read-only file
-system` if their config dirs are bind-mounted `:ro`. They write to their own
-dirs at runtime. The fix for both: inject `auth.json` content via an env var and
-write it to a writable in-container path on startup. The `:ro` bind-mounts for
-these two were removed from compose.
+| Agent       | Method (`incus file push` into the runner)  |
+|-------------|---------------------------------------------|
+| Claude Code | `~/.claude` → `/root/.claude`               |
+| Gemini      | `~/.gemini` → `/root/.gemini`               |
+| OpenCode    | `~/.local/share/opencode/auth.json`         |
+| Codex       | `~/.codex/auth.json`                         |
 
 ### Codex specifics
 - Codex Pro uses **ChatGPT OAuth tokens** (`auth_mode: chatgpt`), NOT
   `OPENAI_API_KEY`. The `auth.json` contains `id_token`, `access_token`,
   `refresh_token`, and `account_id`.
-- To refresh on netcup: `jq -c . ~/.codex/auth.json` locally, then update the
-  `CODEX_AUTH_JSON=...` line in `~/deploy/.env` and force-recreate the runners.
+- To refresh on netcup: `codex login` locally, then
+  `incus file push ~/.codex/auth.json hapi-personal-runner/root/.codex/auth.json`
+  and `incus exec hapi-personal-runner -- systemctl restart hapi-runner`.
+
+### Historical note (Docker era)
+Under Docker, opencode and codex failed with `EROFS` when their config dirs were
+bind-mounted `:ro` (they write at runtime), which forced the
+`OPENCODE_AUTH_JSON` / `CODEX_AUTH_JSON` env-var injection hack. The Incus move
+**retires that hack** — a writable rootfs makes it unnecessary.
+
+## 6a. Why the runner moved to Incus (LXC)
+Docker is an *application*-container runtime (one process); agents want to behave
+like they own a machine (`apt install`, `sudo`, daemons, Docker-in-container).
+Incus *system* containers provide a full OS with systemd and a writable
+filesystem, plus stronger unprivileged isolation via user namespaces — the
+runtime an agent actually wants. The benefit is specific to the runner, so the
+hubs + cloudflared stayed in Docker (hybrid). Established pattern: `code-on-incus`,
+`lincubate`, `vibebin`.
+
+### Two ways to run agents in a runner
+- **A — hub-driven daemon:** the `hapi-runner` service (above) → web UI + Telegram.
+- **B — interactive shell (code-on-incus style):**
+  `incus exec hapi-personal-runner -t --cwd /workspace -- bash -lc 'hapi codex'`
+  (or `hapi opencode` / `hapi gemini` / `hapi`). `/etc/profile.d/hapi.sh` sources
+  `/etc/hapi.env`, so the terminal session also registers with the same hub.
 
 ---
 
@@ -126,32 +159,142 @@ these two were removed from compose.
 - Compose file is **copied via `scp`**, not `git pull` — netcup has no repo
   clone, and `curl` from GitHub raw can serve a stale cached version.
 
-### Required `.env` keys
+### Required `.env` keys (Docker hubs + Incus bootstrap)
 ```
 TUNNEL_TOKEN=eyJ...
 PERSONAL_TOKEN=...
 WORK_TOKEN=...
-HOST_HOME=/home/admin
+INCUS_GW=10.236.0.1                 # incusbr0 gateway; hubs publish here
 PERSONAL_TELEGRAM_BOT_TOKEN=...     # @HAPIPeronsalBot
 WORK_TELEGRAM_BOT_TOKEN=...         # @HAPIWorkBot
-OPENCODE_AUTH_JSON={...}
-CODEX_AUTH_JSON={...}
+```
+> Agent creds are no longer in `.env` — `deploy/incus/bootstrap.sh` pushes
+> `~/.codex/auth.json`, `~/.local/share/opencode/auth.json`, `~/.claude`,
+> `~/.gemini` directly into the runners from the host home dir.
+
+### One-time Incus host setup (Debian 13 / trixie)
+```sh
+sudo apt install -y incus btrfs-progs
+sudo adduser admin incus-admin            # re-login (until then use `sudo incus`)
+sudo incus admin init                     # btrfs pool; bridge incusbr0 = 10.236.0.1/24
 ```
 
-### Redeploy after image change
+#### Docker ↔ Incus firewall (the part that actually bit us)
+`ip-forward-no-drop` in `daemon.json` was **NOT sufficient** on this host: Docker
+(nft backend) still installs a `filter forward … policy drop` hook that overrides
+Incus's own `fwd.incusbr0` chain, so containers got "Network is unreachable"
+during cloud-init. The working fix is explicit `DOCKER-USER` ACCEPT rules for
+`incusbr0`, **persisted** so they survive a Docker restart:
+
+```sh
+# Allow incusbr0 traffic through Docker's FORWARD chain
+sudo iptables -I DOCKER-USER -i incusbr0 -j ACCEPT
+sudo iptables -I DOCKER-USER -o incusbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+# Persist across reboots
+sudo apt install -y iptables-persistent && sudo netfilter-persistent save
+
+# Re-apply on every Docker restart (Docker flushes DOCKER-USER on restart):
+#   /usr/local/sbin/incus-docker-forward.sh   — idempotent `iptables -C || -I` of the two rules above
+#   /etc/systemd/system/docker.service.d/incus-forward.conf:
+#     [Service]
+#     ExecStartPost=/usr/local/sbin/incus-docker-forward.sh
+```
+> These two host files (`incus-docker-forward.sh` + the docker.service drop-in)
+> live on netcup only, not in the repo.
+
+### Deploy / redeploy
+```sh
+# Docker hubs + cloudflared
+scp deploy/docker-compose.yml netcup-us-admin:~/deploy/docker-compose.yml
+ssh netcup-us-admin 'cd ~/deploy && docker compose pull && docker compose up -d --remove-orphans'
+
+# Incus runners (build golden image once, then clone + provision both)
+scp -r deploy/incus netcup-us-admin:~/deploy/incus
+ssh netcup-us-admin 'bash ~/deploy/incus/bootstrap.sh'
+```
+
+### Update HAPI inside a runner (no image rebuild)
+```sh
+incus exec hapi-personal-runner -- bash -lc 'cd /opt/hapi && git pull && /root/.bun/bin/bun install'
+incus exec hapi-personal-runner -- systemctl restart hapi-runner
+```
+
+---
+
+## 7a. Using the runners — the two scenarios
+
+A runner container serves agents in **two independent ways**. Both register with
+the same hub (so anything you start is visible in the web UI + Telegram), because
+the systemd unit and login shells read the same `/etc/hapi.env`.
+
+> All `incus` commands run on the host (`ssh netcup-us-admin`). If the `admin`
+> user isn't in the `incus-admin` group yet, prefix every command with `sudo`.
+> Containers: `hapi-personal-runner` (hub :3006) and `hapi-work-runner` (:3007).
+
+### Scenario A — Hub-driven daemon (web UI + Telegram)
+This is the always-on path. The `hapi-runner` service runs `runner start-sync`,
+connects to the hub, and spawns sessions on demand. **You don't run anything by
+hand** — you drive it from the browser or Telegram:
+
+1. Open `https://hapi-personal.jkryanchou.com` (or `…-work`).
+2. **New session** → pick an agent (Claude / Codex / OpenCode / Gemini) → browse
+   to a workspace dir (e.g. `/workspace/code-handoff`) → create.
+3. The runner spawns the agent and streams it back over SSE; reply from the web
+   UI or from the paired Telegram bot.
+
+Operate the daemon from the host:
+```sh
+# Health / logs
+incus exec hapi-personal-runner -- systemctl status hapi-runner
+incus exec hapi-personal-runner -- journalctl -u hapi-runner -f
+# Confirm the hub is reachable from inside the runner (proves the firewall fix)
+incus exec hapi-personal-runner -- curl -sI http://10.236.0.1:3006
+# Restart after a config/cred change
+incus exec hapi-personal-runner -- systemctl restart hapi-runner
+```
+
+Add a repo to a workspace so it shows up in the **New session** browser:
+```sh
+# Deploy key already exists for code-handoff; clone more repos the same way.
+incus exec hapi-personal-runner -- git clone git@github.com:OWNER/REPO.git /workspace/REPO
+```
+
+### Scenario B — Interactive agent shell (code-on-incus style)
+Drop straight into the container and run an agent in your terminal — the
+equivalent of `coi shell --tool codex`. The login shell (`bash -lc`) sources
+`/etc/profile.d/hapi.sh` → `/etc/hapi.env`, so it gets `HAPI_API_URL` +
+`CLI_API_TOKEN` and the session **also appears in the web UI**.
+
 ```sh
 ssh netcup-us-admin
-cd ~/deploy
-docker compose pull hapi-personal-runner hapi-work-runner
-docker compose up -d --force-recreate hapi-personal-runner hapi-work-runner
-```
-> Use `--force-recreate` when changing **volume mounts** in compose — Docker
-> otherwise reuses the existing container and ignores the new config.
 
-### Update only the compose file
-```sh
-scp deploy/docker-compose.yml netcup-us-admin:~/deploy/docker-compose.yml
+# Codex in /workspace (-t = pty for the TUI, -l = login shell for the env)
+incus exec hapi-personal-runner -t --cwd /workspace -- bash -lc 'hapi codex'
+
+# Other agents — same pattern:
+incus exec hapi-personal-runner -t --cwd /workspace -- bash -lc 'hapi opencode'
+incus exec hapi-personal-runner -t --cwd /workspace -- bash -lc 'hapi gemini'
+incus exec hapi-personal-runner -t --cwd /workspace -- bash -lc 'hapi'          # Claude (default)
+
+# Just want a plain shell to poke around / apt install / git?
+incus exec hapi-personal-runner -t --cwd /workspace -- bash -l
 ```
+
+Variants:
+```sh
+# Pure local TUI, do NOT register with the hub:
+incus exec hapi-personal-runner -t --cwd /workspace -- bash -lc 'hapi codex --hapi-starting-mode local'
+
+# Throwaway, isolated box per task (auto-deleted on stop) — true code-on-incus flow:
+incus launch hapi-runner-golden box-spike --ephemeral --profile hapi-runner
+incus exec box-spike -t --cwd /workspace -- bash -lc 'hapi codex'
+incus stop box-spike     # gone
+```
+
+**When to use which:** Scenario A for normal remote work (phone/web, long-running,
+Telegram replies). Scenario B when you're SSH'd into the box and want a fast,
+hands-on agent session or to debug the environment directly.
 
 ---
 
@@ -205,24 +348,75 @@ was seeded with a clone of `git@github.com:jkryanchou/code-handoff.git`.
 8. **Stale compose after `docker compose up`** → Docker reused old container with
    old mounts; fixed with `--force-recreate`. Also `curl` from GitHub raw served
    a cached file → switched to `scp` of the local compose file.
+9. **Agents wanted full-OS capabilities (`apt`, `sudo`, daemons)** that Docker
+   app containers fight → **migrated runners to Incus (LXC) system containers**
+   (hybrid: hubs/cloudflared stay Docker). This also retired the EROFS env-var
+   auth hack (#4/#7). Cross-engine fix: hubs publish on the bridge gateway
+   `10.236.0.1:3006/:3007` for the runners to reach over `HAPI_API_URL`.
+
+### Problems hit while executing the migration on netcup (2026-06-01)
+10. **cloud-init "Network is unreachable"** → Docker's nft `forward … policy
+    drop` overrode Incus's bridge chain; `ip-forward-no-drop` alone was not
+    enough. Fix: explicit `DOCKER-USER` ACCEPT rules for `incusbr0`, persisted
+    via `iptables-persistent` + a docker.service `ExecStartPost` hook (see §7).
+    The golden image had to be built by hand on the first attempt because
+    cloud-init failed before the firewall was fixed.
+11. **`unzip` missing** → the Bun installer needs it; added to the cloud-init
+    `packages` list.
+12. **`cloud-init status --wait` returned too early** → resolved "done" before
+    the `runcmd` npm installs finished; polled with
+    `until cloud-init status | grep -qE 'done|error'` instead.
+13. **`incus launch --device workspace,…` rejected** ("Device not found in
+    profile devices") → `--device` at launch can only *override* existing
+    profile devices. Fix: launch first, then `incus config device add <name>
+    workspace disk pool=default source=<vol> path=/workspace`.
+14. **`incus file push ~/.codex/auth.json` "Permission denied"** → the host
+    `~/.codex` (and `~/.claude`, `~/.gemini`) were root-owned from the Docker
+    bind-mount era. Fix: `sudo chown -R admin:admin ~/.codex ~/.claude ~/.gemini`.
+15. **No `~/.codex/auth.json` on the host** → old Docker setup stored Codex auth
+    as the `CODEX_AUTH_JSON` env var in `~/deploy/.env`, not a file. Fix:
+    `grep '^CODEX_AUTH_JSON=' ~/deploy/.env | cut -d= -f2- > ~/.codex/auth.json`.
+    (Note: the token nests under `tokens.access_token`, not a top-level field —
+    a verification check that read `d['access_token']` wrongly reported it
+    missing; the `chatgpt` OAuth auth is valid, expires ~2026-06-07.)
+16. **`code-handoff` repo not visible in the session browser** → personal
+    runner's `/workspace` was empty. The opencode `gho_…` token is Copilot-only
+    (403 on repo clone). Fix: generated an **ed25519 deploy key inside the
+    runner** (no private key moved from the host — pushing one was blocked),
+    added it to `jkryanchou/code-handoff` via `gh api repos/.../keys` (read-only,
+    key id 153155838), then `git clone git@github.com:jkryanchou/code-handoff.git
+    /workspace/code-handoff`.
 
 ---
 
 ## 12. Current status
 
-- ✅ CI builds and pushes both images to GHCR on every push to `main`.
-- ✅ Both stacks deployed on netcup behind one Cloudflare Tunnel.
+- ✅ CI builds and pushes the **hub** image to GHCR on every push to `main`.
+- ✅ Hubs + cloudflared deployed on netcup as Docker (one Cloudflare Tunnel).
 - ✅ Personal hub state migrated; SG box retired.
 - ✅ Two Telegram bots configured.
 - ✅ OpenCode working (GitHub Copilot, `claude-sonnet-4.6`).
-- ✅ Codex working (ChatGPT OAuth via `CODEX_AUTH_JSON`); auth.json verified
-  inside the personal runner (`auth_mode: chatgpt`, access token present).
-- Both runners stable (`Up`, registered with their hubs, workspace `/workspace`).
+- ✅ Codex working (ChatGPT OAuth); auth.json provisioned in the runner.
+- ✅ **Runner → Incus migration EXECUTED on netcup (2026-06-01).** Incus 6.0.4
+  installed; btrfs pool + `incusbr0` (`10.236.0.1/24`); Docker↔Incus firewall
+  fixed and persisted (§7). Golden image `hapi-runner-golden` (1272.52MiB) built
+  and published; cloned into `hapi-personal-runner` + `hapi-work-runner`.
+  `hapi-runner.service` **active on both**; both register their `/workspace`
+  with their hub ("Waiting for sessions").
+- ✅ `code-handoff` cloned into the **personal** runner's `/workspace` via an
+  in-container deploy key (see problem #16).
+- ✅ Scenario B verified: a login shell has `HAPI_API_URL` + `CLI_API_TOKEN`;
+  `apt-get install` and Docker-in-container work natively.
 
 ### Next steps / notes
-- Create a Codex session at `https://hapi-personal.jkryanchou.com/sessions/new`
-  (agent: Codex, workspace `/workspace`).
-- Claude Code / Gemini still need their host credential dirs populated on netcup
-  (`/home/admin/.claude`, `/home/admin/.gemini`) if those agents are wanted.
-- ChatGPT OAuth tokens expire — refresh `CODEX_AUTH_JSON` in `~/deploy/.env`
-  from a fresh local `~/.codex/auth.json` when codex stops authenticating.
+- **Verify from the UI:** `hapi-personal.jkryanchou.com/sessions/new` should now
+  list `code-handoff`; create a Codex session in `/workspace/code-handoff`.
+- **Work runner `/workspace` is still empty** — seed it the same way if needed
+  (its own deploy key, or reuse the existing one).
+- **Claude + Gemini have no creds yet:** host `~/.claude` / `~/.gemini` were
+  empty root-owned dirs (chowned to admin, still empty). Populate them on the
+  host and `incus file push -r` into both runners before those agents will auth.
+- ChatGPT OAuth tokens expire (~2026-06-07) — refresh by `codex login` locally +
+  `incus file push ~/.codex/auth.json …` + `systemctl restart hapi-runner`.
+- The `docs/deployment-handoff` branch (PR #3 → `jkryanchou/hapi`) holds all repo
+  changes; commit this doc update and decide whether to merge.
