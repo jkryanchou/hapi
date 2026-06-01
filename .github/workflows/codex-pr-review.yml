@@ -11,6 +11,7 @@ concurrency:
 jobs:
   pr-review:
     if: |
+      false &&
       github.event.pull_request.draft == false &&
       !endsWith(github.actor, '[bot]') &&
       !contains(github.event.pull_request.labels.*.name, 'bot-skip')

@@ -13,6 +13,7 @@ concurrency:
 jobs:
   mention-response:
     if: |
+      false &&
       contains(github.event.comment.body, '@tiann') &&
       !endsWith(github.event.comment.user.login, '[bot]')
     runs-on: ubuntu-latest

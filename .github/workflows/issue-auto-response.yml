@@ -11,6 +11,7 @@ concurrency:
 jobs:
   auto-response:
     if: |
+      false &&
       !contains(github.event.issue.labels.*.name, 'duplicate') &&
       !contains(github.event.issue.labels.*.name, 'spam') &&
       !contains(github.event.issue.labels.*.name, 'bot-skip')
