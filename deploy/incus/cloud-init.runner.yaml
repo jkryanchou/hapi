@@ -57,6 +57,16 @@ write_files:
         set +a
       fi
 
+  # `hapi` command on PATH. The runner runs HAPI from the source clone (there is
+  # no npm-installed bin), so both Scenario A (systemd) and Scenario B
+  # (`incus exec … bash -lc 'hapi codex'`) go through the same launcher.
+  - path: /usr/local/bin/hapi
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      # HAPI source-clone launcher (no npm bin in the runner). Mirrors the systemd unit.
+      exec /root/.bun/bin/bun /opt/hapi/cli/src/index.ts "$@"
+
   # Codex: trust the workspace so it runs non-interactively.
   - path: /root/.codex/config.toml
     permissions: "0644"

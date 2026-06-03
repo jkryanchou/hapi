@@ -228,9 +228,18 @@ A runner container serves agents in **two independent ways**. Both register with
 the same hub (so anything you start is visible in the web UI + Telegram), because
 the systemd unit and login shells read the same `/etc/hapi.env`.
 
-> All `incus` commands run on the host (`ssh netcup-us-admin`). If the `admin`
-> user isn't in the `incus-admin` group yet, prefix every command with `sudo`.
+> All `incus` commands run on the host (`ssh netcup-us-admin`). The `admin` user
+> is **not yet in the `incus-admin` group** (membership needs a re-login), so for
+> now **every `incus` command must be `sudo incus …`** — otherwise you get
+> `permission denied … /home/admin/.config/incus/config.yml`. To drop the `sudo`:
+> `sudo adduser admin incus-admin` then log out and back in.
 > Containers: `hapi-personal-runner` (hub :3006) and `hapi-work-runner` (:3007).
+
+> **`hapi` is a shim, not an npm bin.** The runner has no `@twsxtd/hapi` package
+> installed — it runs from the source clone. A `/usr/local/bin/hapi` wrapper
+> (`exec /root/.bun/bin/bun /opt/hapi/cli/src/index.ts "$@"`) provides the `hapi`
+> command for the shells below; it's baked into `cloud-init.runner.yaml`. Without
+> it you'd see `bash: hapi: command not found`.
 
 ### Scenario A — Hub-driven daemon (web UI + Telegram)
 This is the always-on path. The `hapi-runner` service runs `runner start-sync`,
@@ -270,27 +279,32 @@ equivalent of `coi shell --tool codex`. The login shell (`bash -lc`) sources
 ssh netcup-us-admin
 
 # Codex in /workspace (-t = pty for the TUI, -l = login shell for the env)
-incus exec hapi-personal-runner -t --cwd /workspace -- bash -lc 'hapi codex'
+sudo incus exec hapi-personal-runner -t --cwd /workspace -- bash -lc 'hapi codex'
 
 # Other agents — same pattern:
-incus exec hapi-personal-runner -t --cwd /workspace -- bash -lc 'hapi opencode'
-incus exec hapi-personal-runner -t --cwd /workspace -- bash -lc 'hapi gemini'
-incus exec hapi-personal-runner -t --cwd /workspace -- bash -lc 'hapi'          # Claude (default)
+sudo incus exec hapi-personal-runner -t --cwd /workspace -- bash -lc 'hapi opencode'
+sudo incus exec hapi-personal-runner -t --cwd /workspace -- bash -lc 'hapi gemini'
+sudo incus exec hapi-personal-runner -t --cwd /workspace -- bash -lc 'hapi'      # Claude (default)
 
 # Just want a plain shell to poke around / apt install / git?
-incus exec hapi-personal-runner -t --cwd /workspace -- bash -l
+sudo incus exec hapi-personal-runner -t --cwd /workspace -- bash -l
 ```
 
 Variants:
 ```sh
 # Pure local TUI, do NOT register with the hub:
-incus exec hapi-personal-runner -t --cwd /workspace -- bash -lc 'hapi codex --hapi-starting-mode local'
+sudo incus exec hapi-personal-runner -t --cwd /workspace -- bash -lc 'hapi codex --hapi-starting-mode local'
 
 # Throwaway, isolated box per task (auto-deleted on stop) — true code-on-incus flow:
-incus launch hapi-runner-golden box-spike --ephemeral --profile hapi-runner
-incus exec box-spike -t --cwd /workspace -- bash -lc 'hapi codex'
-incus stop box-spike     # gone
+sudo incus launch hapi-runner-golden box-spike --ephemeral --profile hapi-runner
+sudo incus exec box-spike -t --cwd /workspace -- bash -lc 'hapi codex'
+sudo incus stop box-spike     # gone
 ```
+> ⚠️ The **current** `hapi-runner-golden` image was published *before* the `hapi`
+> shim existed, so ephemeral boxes cloned from it won't have `/usr/local/bin/hapi`
+> until the golden image is rebuilt (`bootstrap.sh`). The two live runners were
+> patched in place. As a stopgap inside any box: run the full
+> `bun /opt/hapi/cli/src/index.ts <agent>`.
 
 **When to use which:** Scenario A for normal remote work (phone/web, long-running,
 Telegram replies). Scenario B when you're SSH'd into the box and want a fast,
