@@ -1,83 +1,35 @@
 services:
-  # ─── Personal hub ────────────────────────────────────────────────────────────
-  hapi-personal:
+  # ─── HAPI hub (single, merged) ───────────────────────────────────────────────
+  # One hub at https://hapi.jkryanchou.com, namespace 'default'. Replaces the old
+  # personal+work split. Runners are NOT Docker services — they run as Incus (LXC)
+  # system containers provisioned from deploy/incus/ (see HANDOFF.md):
+  #   - netcup  hapi-personal-runner → http://10.236.0.1:3006 (same host, bridge GW)
+  #   - devnode hapi-work-runner     → https://hapi.jkryanchou.com (via the tunnel)
+  hapi:
     image: ghcr.io/jkryanchou/hapi-hub:latest
     restart: unless-stopped
     environment:
       HAPI_LISTEN_HOST: 0.0.0.0
       HAPI_LISTEN_PORT: 3006
-      HAPI_PUBLIC_URL: https://hapi-personal.jkryanchou.com
-      CLI_API_TOKEN: ${PERSONAL_TOKEN}
-      TELEGRAM_BOT_TOKEN: ${PERSONAL_TELEGRAM_BOT_TOKEN}
+      HAPI_PUBLIC_URL: https://hapi.jkryanchou.com
+      CLI_API_TOKEN: ${HAPI_TOKEN}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+    ports:
+      - "${INCUS_GW:-10.236.0.1}:3006:3006"   # reachable by the local netcup Incus runner
     volumes:
+      # Volume KEY intentionally kept as `hapi-personal-data` so the existing docker
+      # volume `deploy_hapi-personal-data` (the former personal hub's SQLite/state,
+      # JWT secret, owner id, Telegram bindings) is reused with NO data migration.
       - hapi-personal-data:/root/.hapi
     networks:
       - hapi-net
 
-  hapi-personal-runner:
-    image: ghcr.io/jkryanchou/hapi-runner:latest
-    restart: unless-stopped
-    environment:
-      HAPI_API_URL: http://hapi-personal:3006
-      CLI_API_TOKEN: ${PERSONAL_TOKEN}
-      OPENCODE_AUTH_JSON: ${OPENCODE_AUTH_JSON}
-      CODEX_AUTH_JSON: ${CODEX_AUTH_JSON}
-      # Optional: explicit paths if agent CLIs are not on PATH
-      # HAPI_CLAUDE_PATH: /usr/local/bin/claude
-    volumes:
-      - personal-runner-home:/root/.hapi
-      - personal-workspace:/workspace
-      # Credential dirs for coding agents (read-only mounts from the host)
-      - ${HOST_HOME:-/home/admin}/.claude:/root/.claude:ro
-      - ${HOST_HOME:-/home/admin}/.config/claude:/root/.config/claude:ro
-      - ${HOST_HOME:-/home/admin}/.gemini:/root/.gemini:ro
-      # codex + opencode dirs are NOT bind-mounted — both need write access.
-      # auth.json is injected via CODEX_AUTH_JSON / OPENCODE_AUTH_JSON env vars.
-    depends_on:
-      - hapi-personal
-    networks:
-      - hapi-net
-
-  # ─── Work hub ─────────────────────────────────────────────────────────────────
-  hapi-work:
-    image: ghcr.io/jkryanchou/hapi-hub:latest
-    restart: unless-stopped
-    environment:
-      HAPI_LISTEN_HOST: 0.0.0.0
-      HAPI_LISTEN_PORT: 3006
-      HAPI_PUBLIC_URL: https://hapi-work.jkryanchou.com
-      CLI_API_TOKEN: ${WORK_TOKEN}
-      TELEGRAM_BOT_TOKEN: ${WORK_TELEGRAM_BOT_TOKEN}
-    volumes:
-      - hapi-work-data:/root/.hapi
-    networks:
-      - hapi-net
-
-  hapi-work-runner:
-    image: ghcr.io/jkryanchou/hapi-runner:latest
-    restart: unless-stopped
-    environment:
-      HAPI_API_URL: http://hapi-work:3006
-      CLI_API_TOKEN: ${WORK_TOKEN}
-      OPENCODE_AUTH_JSON: ${OPENCODE_AUTH_JSON}
-      CODEX_AUTH_JSON: ${CODEX_AUTH_JSON}
-    volumes:
-      - work-runner-home:/root/.hapi
-      - work-workspace:/workspace
-      - ${HOST_HOME:-/home/admin}/.claude:/root/.claude:ro
-      - ${HOST_HOME:-/home/admin}/.config/claude:/root/.config/claude:ro
-      - ${HOST_HOME:-/home/admin}/.gemini:/root/.gemini:ro
-    depends_on:
-      - hapi-work
-    networks:
-      - hapi-net
-
-  # ─── Cloudflare Tunnel ────────────────────────────────────────────────────────
-  # Routes hapi-personal.jkryanchou.com → http://hapi-personal:3006
-  #        hapi-work.jkryanchou.com     → http://hapi-work:3006
+  # ─── Cloudflare Tunnel ───────────────────────────────────────────────────────
+  # Single public hostname: hapi.jkryanchou.com → http://hapi:3006
   # Ingress is configured remotely in the Cloudflare dashboard (Zero Trust →
   # Networks → Tunnels → hapi → Public Hostname). The container just carries
   # the tunnel token; routing is owned by Cloudflare's remotely-managed config.
+  # --protocol http2 required (QUIC/UDP blocked on netcup; SSE needs it).
   cloudflared:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped
@@ -85,8 +37,7 @@ services:
     environment:
       TUNNEL_TOKEN: ${TUNNEL_TOKEN}
     depends_on:
-      - hapi-personal
-      - hapi-work
+      - hapi
     networks:
       - hapi-net
 
@@ -94,9 +45,6 @@ networks:
   hapi-net:
 
 volumes:
+  # Historical name: this was the personal hub's volume; kept so deploy_hapi-personal-data
+  # carries over (sessions, JWT secret, Telegram bindings) without a data migration.
   hapi-personal-data:
-  hapi-work-data:
-  personal-runner-home:
-  work-runner-home:
-  personal-workspace:
-  work-workspace:

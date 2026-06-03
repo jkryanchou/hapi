@@ -1,0 +1,103 @@
+#cloud-config
+# HAPI Incus runner provisioning (cloud-init vendor-data).
+#
+# Turns a stock `images:ubuntu/24.04/cloud` container into a HAPI runner:
+#   Bun + Node 22 + agent CLIs (claude/codex/gemini/opencode) + the hapi repo
+#   + the `hapi-runner` systemd unit.
+#
+# Secrets (auth.json, hub token) are NOT baked in here — they are pushed
+# per-runner with `incus file push` after launch (see bootstrap.sh). This file
+# is safe to commit and to publish into the shared golden image.
+
+package_update: true
+packages:
+  - curl
+  - ca-certificates
+  - gnupg
+  - git
+  - build-essential
+  - unzip    # required by the Bun installer
+
+write_files:
+  # ── Scenario A: always-on hub-driven runner (systemd) ──────────────────────
+  - path: /etc/systemd/system/hapi-runner.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=HAPI runner (start-sync)
+      After=network-online.target
+      Wants=network-online.target
+      # Stay inactive until the hub link/token has been provisioned.
+      ConditionPathExists=/etc/hapi.env
+
+      [Service]
+      Type=simple
+      EnvironmentFile=/etc/hapi.env
+      WorkingDirectory=/opt/hapi
+      # Clear stale runner state: a persisted PID can match a reused PID and make
+      # start-sync think a runner is already alive, then exit (crash-loop).
+      ExecStartPre=/usr/bin/rm -f /root/.hapi/runner.state.json /root/.hapi/runner.state.json.lock
+      ExecStart=/root/.bun/bin/bun /opt/hapi/cli/src/index.ts runner start-sync --workspace-root /workspace
+      Restart=always
+      RestartSec=3
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # ── Scenario B: interactive login shells inherit the hub link/token ─────────
+  # So `incus exec … bash -lc 'hapi codex'` registers with the same hub.
+  - path: /etc/profile.d/hapi.sh
+    permissions: "0644"
+    content: |
+      # HAPI hub connection env for interactive shells (incus shell + `hapi codex`)
+      export PATH="/root/.bun/bin:$PATH"
+      if [ -f /etc/hapi.env ]; then
+        set -a
+        . /etc/hapi.env
+        set +a
+      fi
+
+  # `hapi` command on PATH. The runner runs HAPI from the source clone (there is
+  # no npm-installed bin), so both Scenario A (systemd) and Scenario B
+  # (`incus exec … bash -lc 'hapi codex'`) go through the same launcher.
+  - path: /usr/local/bin/hapi
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      # HAPI source-clone launcher (no npm bin in the runner). Mirrors the systemd unit.
+      exec /root/.bun/bin/bun /opt/hapi/cli/src/index.ts "$@"
+
+  # Codex: trust the workspace so it runs non-interactively.
+  - path: /root/.codex/config.toml
+    permissions: "0644"
+    content: |
+      [projects."/workspace"]
+      trust_level = "trusted"
+
+  # OpenCode default config (GitHub Copilot, claude-sonnet-4.6).
+  - path: /root/.config/opencode/opencode.json
+    permissions: "0644"
+    content: |
+      {
+        "$schema": "https://opencode.ai/config.json",
+        "provider": { "github-copilot": {} },
+        "model": "github-copilot/claude-sonnet-4.6"
+      }
+
+runcmd:
+  # Node.js 22 (NodeSource) — agent CLIs are installed as npm global packages.
+  - curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  - apt-get install -y --no-install-recommends nodejs
+  # Agent CLIs on PATH (bare command names: claude / codex / gemini / opencode).
+  - npm install -g @anthropic-ai/claude-code @openai/codex @google/gemini-cli
+  - sh -c 'npm install -g opencode-ai || npm install -g opencode || true'
+  # Bun (installs to /root/.bun) — runs the hapi CLI from source.
+  - export HOME=/root && curl -fsSL https://bun.sh/install | bash
+  # HAPI source. `git -C /opt/hapi pull && bun install` to update later.
+  - git clone https://github.com/jkryanchou/hapi /opt/hapi
+  - cd /opt/hapi && /root/.bun/bin/bun install --frozen-lockfile
+  # Workspace + state + opencode data dirs.
+  - mkdir -p /workspace /root/.hapi /root/.local/share/opencode
+  # Register (do not start) the unit; it starts per-runner once /etc/hapi.env exists.
+  - systemctl daemon-reload
+  - systemctl enable hapi-runner.service

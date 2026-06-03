@@ -1,0 +1,28 @@
+# Reference: the Incus profile `hapi-runner` as constructed by bootstrap.sh.
+#
+# This file is documentation of the resulting profile — DO NOT `incus profile
+# edit < this`, because `cloud-init.vendor-data` here is a placeholder. The real
+# vendor-data is injected from cloud-init.runner.yaml by bootstrap.sh:
+#
+#   incus profile set hapi-runner cloud-init.vendor-data - < cloud-init.runner.yaml
+#
+# To inspect the live profile: `incus profile show hapi-runner`.
+
+name: hapi-runner
+description: HAPI Incus runner (Bun + Node 22 + agent CLIs)
+config:
+  security.nesting: "true"            # allow docker-in-container for agents
+  cloud-init.vendor-data: |
+    # <injected from deploy/incus/cloud-init.runner.yaml by bootstrap.sh>
+devices:
+  eth0:
+    type: nic
+    name: eth0
+    network: incusbr0
+  root:
+    type: disk
+    path: /
+    pool: default
+# NOTE: the per-runner /workspace volume is attached at launch time, not in the
+# shared profile, because the source volume differs per runner:
+#   --device workspace,disk,pool=default,source=<vol>,path=/workspace
