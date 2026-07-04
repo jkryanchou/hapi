@@ -95,8 +95,21 @@ fi
 }
 
 # Hub link + token (consumed by the systemd unit AND interactive login shells).
-printf 'HAPI_API_URL=%s\nCLI_API_TOKEN=%s\n' "$HAPI_API_URL" "$HAPI_TOKEN" \
-  | incus file push - "$RUNNER_NAME/etc/hapi.env"
+# If the SOCKS5->HTTP bridge is configured (above), route agent traffic through
+# it — but NEVER the hub call itself: the bridge's upstream SOCKS5 relay has no
+# route back to this host's own incusbr0, so proxying HAPI_API_URL's host would
+# break every `hapi <agent>` invocation with a 503 (hit this exact regression
+# once already). Derive the bypass host from $HAPI_API_URL rather than
+# hardcoding a bridge IP, so this stays correct on any runner host.
+{
+  printf 'HAPI_API_URL=%s\nCLI_API_TOKEN=%s\n' "$HAPI_API_URL" "$HAPI_TOKEN"
+  if [ -f "$HOME/deploy/socks2http.env" ]; then
+    HAPI_HOST="$(printf '%s' "$HAPI_API_URL" | sed -E 's#^[a-z]+://##; s#[/:].*##')"
+    printf 'HTTP_PROXY=http://127.0.0.1:8118\nHTTPS_PROXY=http://127.0.0.1:8118\n'
+    printf 'http_proxy=http://127.0.0.1:8118\nhttps_proxy=http://127.0.0.1:8118\n'
+    printf 'NO_PROXY=localhost,127.0.0.1,%s\nno_proxy=localhost,127.0.0.1,%s\n' "$HAPI_HOST" "$HAPI_HOST"
+  fi
+} | incus file push - "$RUNNER_NAME/etc/hapi.env"
 incus exec "$RUNNER_NAME" -- systemctl enable --now hapi-runner
 echo "OK: $RUNNER_NAME -> $HAPI_API_URL"
 
