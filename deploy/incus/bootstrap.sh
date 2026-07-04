@@ -75,6 +75,15 @@ fi
   incus file push "$HOME/.local/share/opencode/auth.json" \
                   "$RUNNER_NAME/root/.local/share/opencode/auth.json"
 
+# Authorize the invoking host's SSH key for `herdr --remote` (portless sshd -i;
+# see cloud-init.runner.yaml). Overwrite is fine — single-admin-key runner.
+[ -f "$HOME/.ssh/id_ed25519.pub" ] && {
+  incus exec "$RUNNER_NAME" -- mkdir -p /root/.ssh
+  incus file push "$HOME/.ssh/id_ed25519.pub" "$RUNNER_NAME/root/.ssh/authorized_keys"
+  incus exec "$RUNNER_NAME" -- chmod 700 /root/.ssh
+  incus exec "$RUNNER_NAME" -- chmod 600 /root/.ssh/authorized_keys
+}
+
 # Hub link + token (consumed by the systemd unit AND interactive login shells).
 printf 'HAPI_API_URL=%s\nCLI_API_TOKEN=%s\n' "$HAPI_API_URL" "$HAPI_TOKEN" \
   | incus file push - "$RUNNER_NAME/etc/hapi.env"

@@ -78,6 +78,38 @@ incus launch hapi-runner-golden box-foo --ephemeral --profile hapi-runner
 incus exec box-foo -t --cwd /workspace -- bash -lc 'hapi codex'
 ```
 
+## Extra tooling on the runner
+
+Both are provisioned by `cloud-init.runner.yaml` (in the golden image) and can also
+be installed live into a running runner via `incus exec` (no re-publish).
+
+**Herdr** — an agent-aware terminal multiplexer (`herdr.dev`): run several agents in
+panes with live agent-state detection, persistence, and a socket API. Additive; it
+does not touch the `hapi-runner` daemon. Use it interactively:
+
+```sh
+incus exec hapi-personal-runner -t --cwd /workspace -- bash -lc herdr
+# inside: herdr agent start dev --cwd /workspace -- claude   (sidebar shows state)
+```
+
+Agent integrations (`herdr integration install claude|codex|opencode`) are installed
+at provisioning; **re-run them after a creds refresh** — `incus file push -r ~/.claude`
+overwrites the hook Herdr drops under `~/.claude`.
+
+**Webtop** — a browser-accessible Linux desktop (`lscr.io/linuxserver/webtop`) run as a
+nested Docker container for visual web browsing. On-demand (heavy: ~1-2 GB RAM, 1 GB
+shm). Start it, then reach it over a host-loopback proxy + SSH tunnel — never expose a
+privileged desktop publicly:
+
+```sh
+incus exec hapi-personal-runner -- env WEBTOP_PASSWORD=<pw> hapi-webtop start
+incus config device add hapi-personal-runner webtop proxy \
+  listen=tcp:127.0.0.1:3001 connect=tcp:127.0.0.1:3001        # on the host
+ssh -L 3001:127.0.0.1:3001 netcup-us-admin                    # from your Mac
+# open https://localhost:3001  (basic-auth user: hapi)
+incus exec hapi-personal-runner -- hapi-webtop stop           # stop when idle
+```
+
 ## Update HAPI
 
 ```sh

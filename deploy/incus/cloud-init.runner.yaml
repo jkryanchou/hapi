@@ -3,11 +3,11 @@
 #
 # Turns a stock `images:ubuntu/24.04/cloud` container into a HAPI runner:
 #   Bun + Node 22 + agent CLIs (claude/codex/gemini/opencode) + the hapi repo
-#   + the `hapi-runner` systemd unit.
+#   + the `hapi-runner` systemd unit + gost SOCKS5→HTTP proxy bridge + skills.
 #
-# Secrets (auth.json, hub token) are NOT baked in here — they are pushed
-# per-runner with `incus file push` after launch (see bootstrap.sh). This file
-# is safe to commit and to publish into the shared golden image.
+# Secrets (auth.json, hub token, SOCKS5 creds) are NOT baked in here — they
+# are pushed per-runner with `incus file push` after launch (see bootstrap.sh).
+# This file is safe to commit and to publish into the shared golden image.
 
 package_update: true
 packages:
@@ -17,6 +17,7 @@ packages:
   - git
   - build-essential
   - unzip    # required by the Bun installer
+  - openssh-server  # portless; only used via `incus exec ... sshd -i` for `herdr --remote`
 
 write_files:
   # ── Scenario A: always-on hub-driven runner (systemd) ──────────────────────
@@ -65,7 +66,35 @@ write_files:
     content: |
       #!/usr/bin/env bash
       # HAPI source-clone launcher (no npm bin in the runner). Mirrors the systemd unit.
+      # Source the hub link + token so `hapi <agent>` works in ANY shell, not just
+      # login shells (/etc/profile.d is skipped by non-login shells like
+      # `incus exec … -- bash` or a direct `incus exec … -- hapi opencode`).
+      if [ -f /etc/hapi.env ]; then
+        set -a
+        . /etc/hapi.env
+        set +a
+      fi
       exec /root/.bun/bin/bun /opt/hapi/cli/src/index.ts "$@"
+
+  # Herdr: use login bash for new panes (default falls back to /bin/sh = dash,
+  # which has no readline — Ctrl+L etc. silently no-op).
+  - path: /root/.config/herdr/config.toml
+    permissions: "0644"
+    content: |
+      [terminal]
+      default_shell = "/bin/bash"
+      shell_mode = "login"
+
+  # Chromium inside the nested Webtop container needs --no-sandbox (nested LXC
+  # blocks its kernel sandbox). Mounted read-only into the webtop container at
+  # /custom-cont-init.d by hapi-webtop below (linuxserver custom-init hook).
+  - path: /etc/hapi-webtop-init.d/01-chromium.sh
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      mkdir -p /etc/chromium-browser /etc/chromium
+      echo 'CHROMIUM_FLAGS="--no-sandbox --disable-dev-shm-usage"' \
+        | tee /etc/chromium-browser/default /etc/chromium/default >/dev/null
 
   # Codex: trust the workspace so it runs non-interactively.
   - path: /root/.codex/config.toml
@@ -74,15 +103,81 @@ write_files:
       [projects."/workspace"]
       trust_level = "trusted"
 
-  # OpenCode default config (GitHub Copilot, claude-sonnet-4.6).
+  # OpenCode default config (GitHub Copilot, claude-sonnet-4.6 + superpowers plugin).
   - path: /root/.config/opencode/opencode.json
     permissions: "0644"
     content: |
       {
         "$schema": "https://opencode.ai/config.json",
         "provider": { "github-copilot": {} },
-        "model": "github-copilot/claude-sonnet-4.6"
+        "model": "github-copilot/claude-sonnet-4.6",
+        "plugin": ["superpowers@git+https://github.com/obra/superpowers.git"]
       }
+
+  # ── gost SOCKS5→HTTP bridge (systemd unit, secrets-free) ─────────────────
+  # The unit reads /etc/socks2http.env (pushed per-runner, never baked in).
+  # ConditionPathExists keeps it inert until creds are provisioned, mirroring
+  # the hapi-runner pattern. Starts automatically once the env file arrives.
+  - path: /etc/systemd/system/socks2http.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=gost SOCKS5-to-HTTP bridge for HAPI agents
+      After=network-online.target
+      Wants=network-online.target
+      ConditionPathExists=/etc/socks2http.env
+
+      [Service]
+      EnvironmentFile=/etc/socks2http.env
+      ExecStart=/usr/local/bin/gost -L http://127.0.0.1:8118 -F socks5://${SOCKS_USER}:${SOCKS_PASS}@${SOCKS_HOST}:${SOCKS_PORT}
+      Restart=always
+      RestartSec=3
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # Webtop (browser-accessible Linux desktop) launcher. Runs the linuxserver
+  # Webtop image as a NESTED docker container inside this runner (the profile
+  # sets security.nesting=true). On-demand — not always-on (it is heavy: a full
+  # XFCE desktop + browser, wants ~1-2 GB RAM and 1 GB shm). Reach it by adding
+  # an `incus config device add <runner> webtop proxy listen=tcp:127.0.0.1:3001
+  # connect=tcp:127.0.0.1:3001` on the HOST and SSH-tunnelling :3001 — never
+  # publish a privileged desktop publicly.
+  - path: /usr/local/bin/hapi-webtop
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      IMAGE="lscr.io/linuxserver/webtop:ubuntu-xfce"
+      CONFIG_DIR=/workspace/.webtop
+      case "${1:-start}" in
+        start|restart)
+          : "${WEBTOP_PASSWORD:?set WEBTOP_PASSWORD (basic-auth password for user 'hapi')}"
+          mkdir -p "$CONFIG_DIR"
+          docker rm -f webtop 2>/dev/null || true
+          # --network host (not -p): runc on Docker 29.6+ cannot write the
+          # net.ipv4.ip_unprivileged_port_start sysctl in a fresh netns under
+          # nested unprivileged LXC, so bridge/port-publish fails. Host net binds
+          # :3001 in the runner's own netns (reach it via the loopback proxy).
+          # Resolution is LOCKED (not left to auto-resize): on browser connect,
+          # Selkies otherwise triggers an xrandr resize -> startwm.sh SIGABRTs ->
+          # black screen / crash loop. PUID/PGID must stay 0 (Xvfb needs uid 0
+          # under nested Docker; uid 1000 causes login1 permission-denied loops).
+          docker run -d --name webtop --restart unless-stopped --network host \
+            -e PUID=0 -e PGID=0 -e TZ=Etc/UTC \
+            -e CUSTOM_USER=hapi -e PASSWORD="$WEBTOP_PASSWORD" \
+            -e CUSTOM_RES_W=1920 -e CUSTOM_RES_H=1080 \
+            -e SELKIES_MANUAL_WIDTH=1920 -e SELKIES_MANUAL_HEIGHT=1080 \
+            --shm-size=1gb --security-opt seccomp=unconfined \
+            -v "$CONFIG_DIR:/config" \
+            -v /etc/hapi-webtop-init.d:/custom-cont-init.d:ro \
+            "$IMAGE"
+          echo "webtop up on :3001 (user 'hapi'). Add an incus proxy device + SSH-tunnel to reach it."
+          ;;
+        stop)    docker stop webtop ;;
+        logs)    docker logs --tail 50 -f webtop ;;
+        *) echo "usage: hapi-webtop [start|stop|restart|logs]"; exit 1 ;;
+      esac
 
 runcmd:
   # Node.js 22 (NodeSource) — agent CLIs are installed as npm global packages.
@@ -91,6 +186,19 @@ runcmd:
   # Agent CLIs on PATH (bare command names: claude / codex / gemini / opencode).
   - npm install -g @anthropic-ai/claude-code @openai/codex @google/gemini-cli
   - sh -c 'npm install -g opencode-ai || npm install -g opencode || true'
+  # Herdr — agent-aware terminal multiplexer (manage multiple agents in panes).
+  # Used interactively (Scenario B); does NOT touch the hapi-runner daemon.
+  # Installs to /root/.local/bin; symlink onto the default PATH so login shells
+  # (`incus exec … -t -- bash -lc herdr`) find it. Integrations give Herdr agent
+  # hook reports instead of screen-scraping; re-run them after a creds refresh
+  # (`incus file push -r ~/.claude` overwrites the hook under ~/.claude).
+  - export HOME=/root && curl -fsSL https://herdr.dev/install.sh | sh
+  - ln -sf /root/.local/bin/herdr /usr/local/bin/herdr
+  - for a in claude codex opencode; do /root/.local/bin/herdr integration install "$a" || true; done
+  # Docker engine — required for the nested Webtop browser-desktop (hapi-webtop).
+  - curl -fsSL https://get.docker.com | sh
+  # Pre-pull Webtop so `hapi-webtop start` is fast (start it on-demand, not here).
+  - docker pull lscr.io/linuxserver/webtop:ubuntu-xfce || true
   # Bun (installs to /root/.bun) — runs the hapi CLI from source.
   - export HOME=/root && curl -fsSL https://bun.sh/install | bash
   # HAPI source. `git -C /opt/hapi pull && bun install` to update later.
@@ -98,6 +206,72 @@ runcmd:
   - cd /opt/hapi && /root/.bun/bin/bun install --frozen-lockfile
   # Workspace + state + opencode data dirs.
   - mkdir -p /workspace /root/.hapi /root/.local/share/opencode
+  # Auto-load hub env in INTERACTIVE shells too (e.g. `incus exec … -t -- bash`).
+  # /etc/profile.d only covers login shells; /etc/bash.bashrc covers interactive
+  # non-login shells (and Ubuntu's /etc/profile sources it, so login still works).
+  # Idempotent: guard on a marker so re-running cloud-init does not duplicate it.
+  - grep -q 'hapi.env' /etc/bash.bashrc || printf '\n# HAPI hub env for interactive shells\n[ -f /etc/hapi.env ] && { set -a; . /etc/hapi.env; set +a; }\n' >> /etc/bash.bashrc
   # Register (do not start) the unit; it starts per-runner once /etc/hapi.env exists.
   - systemctl daemon-reload
   - systemctl enable hapi-runner.service
+  # ── gost v3: single static binary, SOCKS5→HTTP bridge ──────────────────────
+  # Detects arch (amd64/arm64), downloads from GitHub releases, installs to
+  # /usr/local/bin/gost. The socks2http.service unit was registered above; it
+  # stays inert until /etc/socks2http.env is pushed per-runner (see bootstrap).
+  - |
+    ARCH=$(uname -m); [ "$ARCH" = "x86_64" ] && ARCH=amd64 || ARCH=arm64
+    GOST_VER=3.2.6
+    cd /tmp
+    curl -fsSL -o gost.tar.gz "https://github.com/go-gost/gost/releases/download/v${GOST_VER}/gost_${GOST_VER}_linux_${ARCH}.tar.gz"
+    tar -xzf gost.tar.gz gost
+    install -m 0755 gost /usr/local/bin/gost
+    rm -f gost gost.tar.gz
+  - systemctl enable socks2http.service
+  # ── Skills for all four agents (non-interactive, no secrets required) ───────
+  # agent-browser, grill-me, grill-with-docs: via vercel-labs skills CLI.
+  # Writes to ~/.agents/skills/ (universal: codex, gemini-cli, opencode) and
+  # symlinks into ~/.claude/skills/ for Claude Code.
+  - export HOME=/root && npx -y skills@latest add vercel-labs/agent-browser -a claude-code -a codex -a gemini-cli -a opencode -g -y || true
+  - export HOME=/root && npm install -g agent-browser || true
+  - export HOME=/root && agent-browser install --with-deps || true
+  - export HOME=/root && npx -y skills@latest add mattpocock/skills --skill grill-me --skill grill-with-docs -a claude-code -a codex -a gemini-cli -a opencode -g -y || true
+  # gstack: git clone + setup for claude/codex/opencode (no gemini support).
+  - git clone --single-branch --depth 1 https://github.com/garrytan/gstack.git /root/.claude/skills/gstack
+  - export HOME=/root PATH=/root/.bun/bin:$PATH && cd /root/.claude/skills/gstack && ./setup --host claude --no-team --no-plan-tune-hooks -q || true
+  - export HOME=/root PATH=/root/.bun/bin:$PATH && cd /root/.claude/skills/gstack && ./setup --host codex --no-team --no-plan-tune-hooks -q || true
+  - export HOME=/root PATH=/root/.bun/bin:$PATH && cd /root/.claude/skills/gstack && ./setup --host opencode --no-team --no-plan-tune-hooks -q || true
+  # firecrawl: skill install across all detected agents (auth deferred; set
+  # FIRECRAWL_API_KEY in /etc/hapi.env later to activate the MCP features).
+  - export HOME=/root && npx -y firecrawl-cli@latest init --all -y --skip-auth || true
+  # superpowers: Claude Code (marketplace) + Gemini (extension, headless).
+  # opencode plugin entry is in write_files above (opencode.json plugin array).
+  # Codex: interactive-only via /plugins TUI — documented in RUNBOOK §7.
+  - export HOME=/root && claude plugin marketplace add obra/superpowers-marketplace && claude plugin install superpowers@superpowers-marketplace || true
+  - export HOME=/root && echo y | gemini extensions install https://github.com/obra/superpowers --consent || true
+  # gsd: for all runtimes (claude/codex/gemini/opencode) in one shot.
+  - export HOME=/root && npx @opengsd/gsd-core@latest --all --global || true
+  # ── AWS CLI v2 ──────────────────────────────────────────────────────────────
+  # Official installer bundle — no apt repo needed. Installs to /usr/local/bin/aws.
+  # Credentials are pushed per-runner via /etc/hapi.env or `aws configure` — not baked in.
+  - |
+    cd /tmp
+    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+    unzip -q awscliv2.zip
+    ./aws/install
+    rm -rf awscliv2.zip aws/
+  # ── GitHub CLI (gh) ─────────────────────────────────────────────────────────
+  # Adds the official GitHub apt repo and installs gh. Updates are then handled
+  # by apt. Auth (GH_TOKEN) is pushed per-runner via /etc/hapi.env — not baked in.
+  - mkdir -p -m 755 /etc/apt/keyrings
+  - curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg >/dev/null
+  - chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+  - echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list
+  - apt-get update -o Dir::Etc::sourceparts=/dev/null -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/github-cli.list
+  - apt-get install -y gh
+  # ── sshd: portless, for `herdr --remote` only ────────────────────────────────
+  # openssh-server is installed (package list) so `incus exec <runner> --
+  # bash -c 'mkdir -p /run/sshd && exec /usr/sbin/sshd -i'` can be used as an SSH
+  # ProxyCommand — no port is ever opened. Disable the systemd unit so it doesn't
+  # also listen on :22. Authorized key is pushed per-runner (see bootstrap.sh),
+  # never baked in.
+  - systemctl disable --now ssh.service 2>/dev/null || true
