@@ -84,6 +84,16 @@ fi
   incus exec "$RUNNER_NAME" -- chmod 600 /root/.ssh/authorized_keys
 }
 
+# gost SOCKS5→HTTP bridge creds (socks2http.service in cloud-init.runner.yaml;
+# inert until this file exists). Colocated with $ENV_FILE — copy the SOCKS_USER/
+# SOCKS_PASS/SOCKS_HOST/SOCKS_PORT vars from an existing runner's
+# /etc/socks2http.env into $HOME/deploy/socks2http.env to provision a new one.
+[ -f "$HOME/deploy/socks2http.env" ] && {
+  incus file push "$HOME/deploy/socks2http.env" "$RUNNER_NAME/etc/socks2http.env"
+  incus exec "$RUNNER_NAME" -- systemctl daemon-reload
+  incus exec "$RUNNER_NAME" -- systemctl enable --now socks2http.service
+}
+
 # Hub link + token (consumed by the systemd unit AND interactive login shells).
 printf 'HAPI_API_URL=%s\nCLI_API_TOKEN=%s\n' "$HAPI_API_URL" "$HAPI_TOKEN" \
   | incus file push - "$RUNNER_NAME/etc/hapi.env"
