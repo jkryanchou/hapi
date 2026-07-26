@@ -190,8 +190,13 @@ runcmd:
   # Pi Coding Agent — bin `pi`; hapi spawns `pi --mode rpc` (JSONL over stdio).
   - npm install -g @earendil-works/pi-coding-agent
   # Kimi Code CLI — bin `kimi`; hapi spawns `kimi acp`. Official standalone
-  # installer (not npm); writes config under ~/.kimi-code.
-  - sh -c 'curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash' || true
+  # installer (not npm); writes config + binary under ~/.kimi-code. It only
+  # adds itself to PATH via ~/.bashrc, which systemd's hapi-runner.service
+  # never sources and which .bashrc itself skips for non-interactive shells —
+  # symlink onto /usr/local/bin (already covers every shell + systemd), same
+  # trick as herdr below.
+  - export HOME=/root && curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash || true
+  - ln -sf /root/.kimi-code/bin/kimi /usr/local/bin/kimi || true
   # Herdr — agent-aware terminal multiplexer (manage multiple agents in panes).
   # Used interactively (Scenario B); does NOT touch the hapi-runner daemon.
   # Installs to /root/.local/bin; symlink onto the default PATH so login shells
