@@ -3,8 +3,8 @@ services:
   # One hub at https://hapi.jkryanchou.com, namespace 'default'. Replaces the old
   # personal+work split. Runners are NOT Docker services — they run as Incus (LXC)
   # system containers provisioned from deploy/incus/ (see HANDOFF.md):
-  #   - netcup  hapi-personal-runner → http://10.236.0.1:3006 (same host, bridge GW)
-  #   - devnode hapi-work-runner     → https://hapi.jkryanchou.com (via the tunnel)
+  #   - swas-sg-bgp hapi-personal-runner → http://10.195.198.1:3006 (same host, bridge GW)
+  #   - devnode     hapi-work-runner     → https://hapi.jkryanchou.com (via the tunnel)
   hapi:
     image: ghcr.io/jkryanchou/hapi-hub:latest
     restart: unless-stopped
@@ -15,7 +15,7 @@ services:
       CLI_API_TOKEN: ${HAPI_TOKEN}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
     ports:
-      - "${INCUS_GW:-10.236.0.1}:3006:3006"   # reachable by the local netcup Incus runner
+      - "${INCUS_GW:-10.195.198.1}:3006:3006"   # reachable by the local swas-sg-bgp Incus runner
     volumes:
       # Volume KEY intentionally kept as `hapi-personal-data` so the existing docker
       # volume `deploy_hapi-personal-data` (the former personal hub's SQLite/state,
@@ -29,7 +29,7 @@ services:
   # Ingress is configured remotely in the Cloudflare dashboard (Zero Trust →
   # Networks → Tunnels → hapi → Public Hostname). The container just carries
   # the tunnel token; routing is owned by Cloudflare's remotely-managed config.
-  # --protocol http2 required (QUIC/UDP blocked on netcup; SSE needs it).
+  # --protocol http2 required (QUIC/UDP blocked on swas-sg-bgp; SSE needs it).
   cloudflared:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped

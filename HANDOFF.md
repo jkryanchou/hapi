@@ -15,10 +15,18 @@ development scenarios:
 
 | Runner                | Host                              | Hub link (`HAPI_API_URL`)        |
 |-----------------------|-----------------------------------|----------------------------------|
-| `hapi-personal-runner`| `netcup-us-admin` (Debian 13)     | `http://10.236.0.1:3006` (bridge)|
+| `hapi-personal-runner`| `swas-sg-bgp` (Ubuntu 24.04)      | `http://10.195.198.1:3006` (bridge)|
 | `hapi-work-runner`    | `ir-devnode-ryan` (Ubuntu 24.04)  | `https://hapi.jkryanchou.com`    |
 
-The **hub + cloudflared run in Docker on netcup** (hub image built by GitHub
+> **2026-07-26 update:** the personal runner + hub moved off `netcup-us-admin`
+> (retired) onto `swas-sg-bgp` per `deploy/MIGRATION-SG-CONSOLIDATION.md`. Every
+> `netcup-us-admin` / `10.236.0.1` reference below this point is the pre-move
+> state, left as-is except where corrected inline — the Debian-13/DOCKER-USER
+> firewall specifics in §7 have NOT been re-verified against `swas-sg-bgp`
+> (which reports as Ubuntu 24.04 live), so treat that subsection as historical
+> until someone confirms it on the new host.
+
+The **hub + cloudflared run in Docker on swas-sg-bgp** (hub image built by GitHub
 Actions → GHCR); the **runners run as Incus (LXC) system containers** (§6a),
 one per host. Both runners share the hub's base `CLI_API_TOKEN` (`HAPI_TOKEN`),
 so everything appears under one web login and one Telegram bot.
@@ -34,8 +42,8 @@ so everything appears under one web login and one Telegram bot.
                 │    cloudflared     │  (--protocol http2, token-based)
                 └─────────┬─────────┘
                           ▼
-   netcup ────────  hapi:3006  (Docker hub: REST+SSE+Telegram)
-   │                 ▲      ▲ published on 10.236.0.1:3006 (incusbr0 GW)
+   swas-sg-bgp ────  hapi:3006  (Docker hub: REST+SSE+Telegram)
+   │                 ▲      ▲ published on 10.195.198.1:3006 (incusbr0 GW)
    │   Socket.IO /cli│      │
    │  hapi-personal-runner ─┘   (Incus LXC, /workspace)
    │
@@ -46,12 +54,13 @@ so everything appears under one web login and one Telegram bot.
 
 - **Hub ↔ runner auth**: one shared base token `HAPI_TOKEN`; both runners use it
   verbatim → single namespace `default` (one login, one machine list, one bot).
-- **netcup runner** reaches the hub privately over the Incus bridge gateway
-  (`10.236.0.1:3006`); Docker's `FORWARD DROP` is neutralised on that host (§7).
+- **swas-sg-bgp runner** reaches the hub privately over the Incus bridge gateway
+  (`10.195.198.1:3006`); the DOCKER-USER firewall note in §7 is historical
+  (written for the old netcup host) and has not been re-verified here.
 - **devnode runner** reaches the hub over the public tunnel URL — outbound HTTPS
   only, no ingress needed on the devnode.
 - `--protocol http2` is **required** for cloudflared (QUIC/UDP blocked on
-  netcup; SSE needs it).
+  swas-sg-bgp; SSE needs it).
 
 ---
 
@@ -348,26 +357,27 @@ domain, update it in @BotFather to `https://hapi.jkryanchou.com`.
 
 ### Update HAPI inside a runner (after any push to main)
 ```sh
-# netcup
-ssh netcup-us-admin
-sudo incus exec hapi-personal-runner -- bash -lc 'cd /opt/hapi && git pull --ff-only && /root/.bun/bin/bun install'
+# swas-sg-bgp (personal runner; main is force-pushed on rebase, so reset --hard,
+# NOT git pull --ff-only — the latter will fail after any upstream rebase)
+ssh swas-sg-bgp
+sudo incus exec hapi-personal-runner -- bash -lc 'cd /opt/hapi && git fetch origin && git reset --hard origin/main && /root/.bun/bin/bun install'
 sudo incus exec hapi-personal-runner -- systemctl restart hapi-runner
 
 # devnode
 ssh ir-devnode-ryan
-incus exec hapi-work-runner -- bash -lc 'cd /opt/hapi && git pull --ff-only && /root/.bun/bin/bun install'
+incus exec hapi-work-runner -- bash -lc 'cd /opt/hapi && git fetch origin && git reset --hard origin/main && /root/.bun/bin/bun install'
 incus exec hapi-work-runner -- systemctl restart hapi-runner
 ```
 
 ### Update the hub (after CI publishes; check docker-publish is green first)
 ```sh
-ssh netcup-us-admin 'cd ~/deploy && docker compose pull hapi && docker compose up -d hapi'
+ssh swas-sg-bgp 'cd ~/deploy && docker compose pull hapi && docker compose up -d hapi'
 ```
 
 ### Health
 ```sh
 curl -sI https://hapi.jkryanchou.com                                  # 200 via tunnel
-ssh netcup-us-admin 'curl -sI http://10.236.0.1:3006'                 # 200 on the bridge
-ssh netcup-us-admin 'sudo incus exec hapi-personal-runner -- journalctl -u hapi-runner -n 20 --no-pager'
+ssh swas-sg-bgp 'curl -sI http://10.195.198.1:3006'                   # 200 on the bridge
+ssh swas-sg-bgp 'sudo incus exec hapi-personal-runner -- journalctl -u hapi-runner -n 20 --no-pager'
 ssh ir-devnode-ryan 'incus exec hapi-work-runner -- journalctl -u hapi-runner -n 20 --no-pager'
 ```
